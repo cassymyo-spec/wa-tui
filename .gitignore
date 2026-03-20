@@ -1,0 +1,7 @@
+.env
+node_modules
+
+.DS_Store
+
+.wwebjs_cache
+.wwebjs_auth
