@@ -53,28 +53,6 @@ Incoming messages play a short sound when you are **not** viewing that chat. Def
 | `npm start` | Run the TUI |
 | `npm run start:resize` | Run with `WA_TUI_RESIZE=1` |
 
-## Releasing (CI publish)
-
-Pushing a **semver tag** `v*` that matches `version` in `package.json` triggers [`.github/workflows/publish-npm.yml`](.github/workflows/publish-npm.yml), which runs `npm publish --access public --provenance`.
-
-### One-time: GitHub secret
-
-1. In npm: [Access Tokens](https://www.npmjs.com/settings/~gtchakama/tokens) → create a **Granular Access Token** (or **Automation**) with permission to publish **`@gtchakama/wa-tui`**.
-2. In GitHub: repo **Settings → Secrets and variables → Actions** → create **`NPM_TOKEN`** with that token value.
-
-### Ship a new version locally
-
-From `main` (or your release branch), after your changes are committed:
-
-```bash
-npm version patch   # or minor | major — updates package.json + package-lock.json + creates git commit + tag vX.Y.Z
-git push origin HEAD --follow-tags
-```
-
-The tag push runs the workflow; it fails if the tag (without `v`) does not equal `package.json` version, so they stay in sync.
-
-If `--provenance` ever fails with your token setup, remove that flag from the workflow and publish again.
-
 ## Disclaimer
 
 WhatsApp’s terms of service apply to any client you use. This project is an unofficial interface; use it at your own risk.
