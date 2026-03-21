@@ -6,6 +6,7 @@ const { formatTimestamp, truncate, chatIdsMatch } = require('../utils/format');
 const { augmentDisplayPlain } = require('../utils/messageFormat');
 const { paginate } = require('../utils/pager');
 const { playIncomingMessageSound } = require('../utils/notifySound');
+const { notifyDesktop } = require('../utils/notifyDesktop');
 const { loadSettings, saveSettings } = require('../config/userSettings');
 const {
   PALETTES,
@@ -25,6 +26,8 @@ const theme = Object.assign(
 
 const screen = blessed.screen({
   smartCSR: true,
+  fullUnicode: true,
+  forceUnicode: true,
   title: 'wa-tui',
   // neo-blessed only applies cursor styling if `shape` is set (see screen.enter).
   cursor: {
@@ -41,14 +44,37 @@ const layout = {
   header: null,
   main: null,
   footer: null,
+  chatBrowser: null,
+  chatListPane: null,
+  chatListMeta: null,
   chatList: null,
+  chatPreviewPane: null,
+  chatPreviewMeta: null,
+  chatPreviewBody: null,
+  chatMetaPane: null,
+  chatMetaBody: null,
   chatDetail: null,
+  chatDetailMain: null,
+  chatDetailSide: null,
+  chatDetailSideBody: null,
   replyBar: null,
   settingsList: null,
+  settingsRoot: null,
+  settingsListPane: null,
+  settingsPreviewPane: null,
+  settingsPreviewBody: null,
+  qrRoot: null,
+  qrStepsPane: null,
+  qrStepsBody: null,
+  qrPane: null,
+  qrPaneBody: null,
   qrBox: null
 };
 
 let bootLoaderInterval = null;
+let currentChatPageItems = [];
+let chatPreviewToken = 0;
+let settingsPreviewPaletteId = normalizePaletteId(loadSettings().palette);
 
 /** xterm-style window resize CSI (opt-in: WA_TUI_RESIZE=1). */
 function tryResizeTerminal(rows, cols) {
@@ -59,6 +85,56 @@ function tryResizeTerminal(rows, cols) {
 /** Usable rows between 1-line header (top 0) and 1-line footer. */
 function innerRows() {
   return Math.max(6, (screen.height || 24) - 2);
+}
+
+function makePane(parent, label, options = {}) {
+  const transparent = options.transparent !== false;
+  const pane = blessed.box({
+    parent,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 10,
+    border: 'line',
+    label: ` ${label} `,
+    tags: true,
+    transparent,
+    style: {
+      fg: theme.fg,
+      border: { fg: theme.fgDim },
+      label: { fg: theme.fgDim }
+    }
+  });
+
+  const inner = blessed.box({
+    parent: pane,
+    top: 1,
+    left: 1,
+    width: Math.max(2, pane.width - 2),
+    height: Math.max(2, pane.height - 2),
+    tags: true,
+    transparent,
+    style: { fg: theme.fg }
+  });
+
+  pane._inner = inner;
+  return pane;
+}
+
+function setPaneActive(pane, active) {
+  if (!pane || !pane.style) return;
+  if (!pane.style.border) pane.style.border = {};
+  if (!pane.style.label) pane.style.label = {};
+  pane.style.border.fg = active ? theme.accent : theme.fgDim;
+  pane.style.label.fg = active ? theme.accent : theme.fgDim;
+}
+
+function resizePaneInner(pane) {
+  if (!pane || !pane._inner) return;
+  pane._inner.top = 1;
+  pane._inner.left = 1;
+  pane._inner.width = Math.max(2, pane.width - 2);
+  pane._inner.height = Math.max(2, pane.height - 2);
 }
 
 function layoutMainPanel(phase) {
@@ -269,6 +345,56 @@ function refreshWidgetStyles() {
     }
     if (layout.settingsList.style.track) delete layout.settingsList.style.track.bg;
   }
+
+  [
+    layout.chatListPane,
+    layout.chatPreviewPane,
+    layout.chatMetaPane,
+    layout.chatDetailMain,
+    layout.chatDetailSide,
+    layout.settingsListPane,
+    layout.settingsPreviewPane,
+    layout.qrStepsPane,
+    layout.qrPane
+  ].forEach((pane) => {
+    if (!pane) return;
+    pane.style.fg = theme.fg;
+    if (!pane.style.border) pane.style.border = {};
+    if (!pane.style.label) pane.style.label = {};
+  });
+
+  if (layout.chatListMeta) {
+    layout.chatListMeta.style.fg = theme.fgDim;
+    delete layout.chatListMeta.style.bg;
+  }
+  if (layout.chatPreviewMeta) {
+    layout.chatPreviewMeta.style.fg = theme.fgDim;
+    delete layout.chatPreviewMeta.style.bg;
+  }
+  if (layout.chatPreviewBody) {
+    layout.chatPreviewBody.style.fg = theme.fg;
+    delete layout.chatPreviewBody.style.bg;
+  }
+  if (layout.chatMetaBody) {
+    layout.chatMetaBody.style.fg = theme.fg;
+    delete layout.chatMetaBody.style.bg;
+  }
+  if (layout.chatDetailSideBody) {
+    layout.chatDetailSideBody.style.fg = theme.fg;
+    delete layout.chatDetailSideBody.style.bg;
+  }
+  if (layout.settingsPreviewBody) {
+    layout.settingsPreviewBody.style.fg = theme.fg;
+    delete layout.settingsPreviewBody.style.bg;
+  }
+  if (layout.qrStepsBody) {
+    layout.qrStepsBody.style.fg = theme.fg;
+    delete layout.qrStepsBody.style.bg;
+  }
+  if (layout.qrPaneBody) {
+    layout.qrPaneBody.style.fg = theme.fg;
+    delete layout.qrPaneBody.style.bg;
+  }
 }
 
 function applyPalette(paletteId) {
@@ -277,100 +403,19 @@ function applyPalette(paletteId) {
   saveSettings({ palette: id });
   syncScreenTheme();
   refreshWidgetStyles();
-}
-
-function syncSettingsListGeometry() {
-  if (!layout.settingsList) return;
-  layout.settingsList.top = 1;
-  layout.settingsList.left = 0;
-  layout.settingsList.width = '100%';
-  layout.settingsList.height = innerRows();
-}
-
-function ensureSettingsList() {
-  if (layout.settingsList) return;
-  layout.settingsList = blessed.list({
-    top: 1,
-    left: 0,
-    width: '100%',
-    height: innerRows(),
-    keys: true,
-    vi: true,
-    mouse: true,
-    tags: true,
-    invertSelected: false,
-    transparent: true,
-    scrollbar: {
-      ch: '│',
-      style: { fg: theme.fgDim }
-    },
-      style: {
-        fg: theme.fg,
-        selected: {
-          fg: theme.accent,
-          bold: true,
-          underline: true
-        }
-      }
-    });
-  layout.settingsList.on('select', (el, index) => {
-    const id = PALETTE_ORDER[index];
-    if (!id) return;
-    applyPalette(id);
-    closeSettings();
-  });
-  screen.append(layout.settingsList);
-}
-
-function openSettings() {
-  if (state.screen !== 'chats' && state.screen !== 'chatDetail') return;
-  state.settingsReturnScreen = state.screen;
-  state.screen = 'settings';
-  if (layout.chatList) layout.chatList.hide();
-  if (layout.chatDetail) layout.chatDetail.hide();
-  ensureSettingsList();
-  syncSettingsListGeometry();
-  const items = PALETTE_ORDER.map((id) => {
-    const p = PALETTES[id];
-    const mark =
-      theme.paletteId === id
-        ? `  {${theme.fgDim}-fg}(current){/${theme.fgDim}-fg}`
-        : '';
-    const label = p.label.replace(/\{/g, '(').replace(/\}/g, ')');
-    return `${label} {${theme.fgDim}-fg}· ${id}{/${theme.fgDim}-fg}${mark}`;
-  });
-  layout.settingsList.setItems(items);
-  refreshWidgetStyles();
-  layout.settingsList.show();
-  layout.settingsList.focus();
-  updateTitle();
-  updateFooter();
-  screen.render();
-}
-
-function closeSettings() {
-  if (state.screen !== 'settings') return;
-  if (layout.settingsList) layout.settingsList.hide();
-  const back = state.settingsReturnScreen || 'chats';
-  state.screen = back;
-  state.settingsReturnScreen = null;
-
-  if (back === 'chatDetail') {
-    layout.chatDetail?.show();
-    refreshWidgetStyles();
-    redrawChatMessages();
-    updateReplyBarContent();
-    layout.input?.focus();
-    updateTitle();
-    updateFooter();
-    screen.render();
-    return;
+  if (state.screen === 'chats') {
+    setPaneActive(layout.chatListPane, true);
+    setPaneActive(layout.chatPreviewPane, false);
+    setPaneActive(layout.chatMetaPane, false);
+  } else if (state.screen === 'chatDetail') {
+    setPaneActive(layout.chatDetailMain, true);
+    setPaneActive(layout.chatDetailSide, false);
+  } else if (state.screen === 'settings') {
+    setPaneActive(layout.settingsListPane, true);
+    setPaneActive(layout.settingsPreviewPane, false);
+    renderSettingsPreview(id);
+    syncSettingsItems();
   }
-  if (back === 'chats' && state.chats && state.chats.length) {
-    showChats(state.chats);
-    return;
-  }
-  void refreshChats();
 }
 
 function createFooter() {
@@ -444,30 +489,38 @@ function updateTitle() {
 }
 
 function syncListAndDetailHeights() {
-  const inner = innerRows();
-  if (layout.chatList) {
-    layout.chatList.top = 1;
-    layout.chatList.height = inner;
-  }
+  syncChatBrowserLayout();
+  syncChatDetailShell();
   applyChatDetailLayout();
 }
 
+function hidePrimaryViews() {
+  layout.main?.hide();
+  layout.chatBrowser?.hide();
+  layout.chatDetail?.hide();
+  layout.settingsRoot?.hide();
+  layout.qrRoot?.hide();
+}
+
 function applyChatDetailLayout() {
-  const inner = innerRows();
-  if (!layout.chatDetail || !layout.msgList || !layout.input) return;
+  if (!layout.chatDetailMain || !layout.chatDetailMain._inner || !layout.msgList || !layout.input) return;
+  const inner = layout.chatDetailMain._inner.height;
+  const width = layout.chatDetailMain._inner.width;
   const inputH = layout.input.height || 3;
   const replyH = state.replyTo ? 1 : 0;
-  layout.chatDetail.top = 1;
-  layout.chatDetail.height = inner;
   if (layout.replyBar) {
     layout.replyBar.hidden = !state.replyTo;
     layout.replyBar.bottom = inputH;
     layout.replyBar.left = 0;
-    layout.replyBar.width = '100%';
+    layout.replyBar.width = width;
     layout.replyBar.height = 1;
   }
   layout.input.bottom = 0;
+  layout.input.left = 0;
+  layout.input.width = width;
   layout.msgList.top = 0;
+  layout.msgList.left = 0;
+  layout.msgList.width = width;
   layout.msgList.height = Math.max(4, inner - inputH - replyH);
 }
 
@@ -531,6 +584,7 @@ function redrawChatMessages() {
 
 function finishReplyUi() {
   updateReplyBarContent();
+  renderChatDetailMeta();
   applyChatDetailLayout();
   redrawChatMessages();
   screen.render();
@@ -656,9 +710,9 @@ function init() {
 
   screen.on('resize', () => {
     if (state.screen === 'loading') layoutMainPanel('loading');
-    else if (state.screen === 'qr') layoutMainPanel('qr');
     syncListAndDetailHeights();
     syncSettingsListGeometry();
+    syncQrLayout();
     screen.render();
   });
 
@@ -667,24 +721,768 @@ function init() {
   screen.render();
 }
 
+function chatBrowserGeometry() {
+  const totalWidth = screen.width || 100;
+  const totalHeight = innerRows();
+  const rightWidth = Math.max(28, Math.floor(totalWidth * 0.24));
+  const leftWidth = Math.max(30, Math.floor(totalWidth * 0.31));
+  const gap = 1;
+  const centerWidth = Math.max(
+    32,
+    totalWidth - leftWidth - rightWidth - gap * 2
+  );
+  return {
+    top: 1,
+    leftWidth,
+    centerWidth,
+    rightWidth,
+    gap,
+    height: totalHeight
+  };
+}
+
+function detailGeometry() {
+  const {
+    top,
+    leftWidth,
+    centerWidth,
+    rightWidth,
+    gap,
+    height
+  } = chatBrowserGeometry();
+  return {
+    top,
+    left: leftWidth + gap,
+    mainWidth: centerWidth,
+    sideWidth: rightWidth,
+    gap,
+    height
+  };
+}
+
+function showChatBrowserColumns(mode = 'browser') {
+  if (!layout.chatBrowser) return;
+  layout.chatBrowser.show();
+  layout.chatListPane?.show();
+  if (mode === 'detail') {
+    layout.chatPreviewPane?.hide();
+    layout.chatMetaPane?.hide();
+    return;
+  }
+  layout.chatPreviewPane?.show();
+  layout.chatMetaPane?.show();
+}
+
+function formatChatListItems(pageItems) {
+  return pageItems.map((c) => {
+    const unread =
+      c.unreadCount > 0
+        ? ` {${theme.unread}-fg}[${c.unreadCount}]{/${theme.unread}-fg}`
+        : '';
+    const type = c.isGroup
+      ? ` {${theme.fgDim}-fg}[grp]{/${theme.fgDim}-fg}`
+      : ` {${theme.fgDim}-fg}[dm]{/${theme.fgDim}-fg}`;
+    const time = formatTimestamp(c.timestamp);
+    const lastMsg = truncate(c.lastMessage || '—', 56);
+    const name = String(c.name || '').replace(/\{/g, '(').replace(/\}/g, ')');
+
+    return `${name}${unread}${type} {${theme.fgDim}-fg}${time}{/${theme.fgDim}-fg}\n` +
+      `  {${theme.fgDim}-fg}${lastMsg.replace(/\{/g, '(').replace(/\}/g, ')')}{/${theme.fgDim}-fg}`;
+  });
+}
+
+function renderChatPreviewBody(chat, rows, error) {
+  if (!layout.chatPreviewBody) return;
+  if (!chat) {
+    layout.chatPreviewBody.setContent(
+      `{${theme.fgDim}-fg}Move through chats to preview the latest messages.{/${theme.fgDim}-fg}`
+    );
+    return;
+  }
+  if (error) {
+    layout.chatPreviewBody.setContent(
+      `{${theme.error}-fg}Preview failed: ${String(error).replace(/\{/g, '(')}{/${theme.error}-fg}`
+    );
+    return;
+  }
+  if (!rows) {
+    layout.chatPreviewBody.setContent(
+      `{${theme.fgDim}-fg}Loading preview…{/${theme.fgDim}-fg}`
+    );
+    return;
+  }
+  if (!rows.length) {
+    layout.chatPreviewBody.setContent(
+      `{${theme.fgDim}-fg}No preview messages available.{/${theme.fgDim}-fg}`
+    );
+    return;
+  }
+
+  const content = rows
+    .map((m) => {
+      const nameColor = (m.fromMe ? theme.selfMsg : theme.peerMsg).slice(1);
+      const who = m.fromMe ? 'You' : m.author;
+      const body = augmentDisplayPlain(m).replace(/\{/g, '(');
+      return `[${formatTimestamp(m.timestamp)}] {bold}{#${nameColor}-fg}${who}{/#${nameColor}-fg}{/bold}\n` +
+        `  ${body}`;
+    })
+    .join('\n');
+  layout.chatPreviewBody.setContent(content);
+}
+
+function renderChatMeta(chat) {
+  if (!layout.chatMetaBody) return;
+  if (!chat) {
+    layout.chatMetaBody.setContent(
+      `{${theme.fgDim}-fg}No chat selected.{/${theme.fgDim}-fg}`
+    );
+    return;
+  }
+  const lines = [
+    `{bold}type{/bold}`,
+    chat.isGroup ? 'group' : 'direct message',
+    '',
+    `{bold}unread{/bold}`,
+    String(chat.unreadCount || 0),
+    '',
+    `{bold}last activity{/bold}`,
+    formatTimestamp(chat.timestamp || 0),
+    '',
+    `{bold}actions{/bold}`,
+    'Enter open chat',
+    'click row select/open',
+    'R reload list',
+    'N/P page',
+    '',
+    `{${theme.accent}-fg}filters: 1 all · 2 direct · 3 groups · U unread{/}`
+  ];
+  layout.chatMetaBody.setContent(lines.join('\n'));
+}
+
+async function loadChatPreview(chat) {
+  const token = ++chatPreviewToken;
+  renderChatPreviewBody(chat, null, null);
+  try {
+    const rows = await waService.getMessages(chat.id, 8, chat.raw);
+    if (token !== chatPreviewToken) return;
+    renderChatPreviewBody(chat, rows, null);
+    screen.render();
+  } catch (err) {
+    if (token !== chatPreviewToken) return;
+    renderChatPreviewBody(chat, null, err.message || String(err));
+    screen.render();
+  }
+}
+
+function syncChatBrowserLayout() {
+  if (!layout.chatBrowser) return;
+  const { top, leftWidth, centerWidth, rightWidth, gap, height } =
+    chatBrowserGeometry();
+
+  layout.chatBrowser.top = top;
+  layout.chatBrowser.left = 0;
+  layout.chatBrowser.width = screen.width || 100;
+  layout.chatBrowser.height = height;
+
+  layout.chatListPane.top = 0;
+  layout.chatListPane.left = 0;
+  layout.chatListPane.width = leftWidth;
+  layout.chatListPane.height = height;
+  resizePaneInner(layout.chatListPane);
+  layout.chatListMeta.top = 0;
+  layout.chatListMeta.left = 0;
+  layout.chatListMeta.width = layout.chatListPane._inner.width;
+  layout.chatListMeta.height = 2;
+  layout.chatList.top = 2;
+  layout.chatList.left = 0;
+  layout.chatList.width = layout.chatListPane._inner.width;
+  layout.chatList.height = Math.max(1, layout.chatListPane._inner.height - 2);
+
+  layout.chatPreviewPane.top = 0;
+  layout.chatPreviewPane.left = leftWidth + gap;
+  layout.chatPreviewPane.width = centerWidth;
+  layout.chatPreviewPane.height = height;
+  resizePaneInner(layout.chatPreviewPane);
+  layout.chatPreviewMeta.top = 0;
+  layout.chatPreviewMeta.left = 0;
+  layout.chatPreviewMeta.width = layout.chatPreviewPane._inner.width;
+  layout.chatPreviewMeta.height = 2;
+  layout.chatPreviewBody.top = 2;
+  layout.chatPreviewBody.left = 0;
+  layout.chatPreviewBody.width = layout.chatPreviewPane._inner.width;
+  layout.chatPreviewBody.height = Math.max(1, layout.chatPreviewPane._inner.height - 2);
+
+  layout.chatMetaPane.top = 0;
+  layout.chatMetaPane.left = leftWidth + gap + centerWidth + gap;
+  layout.chatMetaPane.width = rightWidth;
+  layout.chatMetaPane.height = height;
+  resizePaneInner(layout.chatMetaPane);
+  layout.chatMetaBody.top = 0;
+  layout.chatMetaBody.left = 0;
+  layout.chatMetaBody.width = layout.chatMetaPane._inner.width;
+  layout.chatMetaBody.height = layout.chatMetaPane._inner.height;
+}
+
+function ensureChatBrowserLayout() {
+  if (layout.chatBrowser) return;
+
+  layout.chatBrowser = blessed.box({
+    top: 1,
+    left: 0,
+    width: '100%',
+    height: innerRows(),
+    transparent: true
+  });
+  screen.append(layout.chatBrowser);
+
+  layout.chatListPane = makePane(layout.chatBrowser, ' chats ');
+  layout.chatListMeta = blessed.box({
+    parent: layout.chatListPane._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 2,
+    tags: true,
+    transparent: true,
+    style: { fg: theme.fgDim }
+  });
+  layout.chatList = blessed.list({
+    parent: layout.chatListPane._inner,
+    top: 2,
+    left: 0,
+    width: 10,
+    height: 10,
+    keys: true,
+    vi: true,
+    mouse: true,
+    tags: true,
+    invertSelected: false,
+    transparent: true,
+    scrollbar: {
+      ch: '│',
+      style: { fg: theme.fgDim }
+    },
+    style: {
+      fg: theme.fg,
+      selected: {
+        fg: theme.accent,
+        bold: true,
+        underline: true
+      }
+    }
+  });
+
+  layout.chatPreviewPane = makePane(layout.chatBrowser, ' preview ');
+  layout.chatPreviewMeta = blessed.box({
+    parent: layout.chatPreviewPane._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 2,
+    tags: true,
+    transparent: true,
+    style: { fg: theme.fgDim }
+  });
+  layout.chatPreviewBody = blessed.box({
+    parent: layout.chatPreviewPane._inner,
+    top: 2,
+    left: 0,
+    width: 10,
+    height: 10,
+    tags: true,
+    mouse: true,
+    scrollable: true,
+    alwaysScroll: true,
+    transparent: true,
+    style: { fg: theme.fg }
+  });
+
+  layout.chatMetaPane = makePane(layout.chatBrowser, ' meta ');
+  layout.chatMetaBody = blessed.box({
+    parent: layout.chatMetaPane._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 10,
+    tags: true,
+    transparent: true,
+    style: { fg: theme.fg }
+  });
+
+  syncChatBrowserLayout();
+}
+
+function renderChatDetailMeta() {
+  if (!layout.chatDetailSideBody) return;
+  const chat = state.currentRawChat;
+  const lines = [
+    `{bold}type{/bold}`,
+    chat && chat.isGroup ? 'group' : 'direct message',
+    '',
+    `{bold}chat{/bold}`,
+    (state.currentChatName || 'Unknown').replace(/\{/g, '('),
+    '',
+    `{bold}reply target{/bold}`,
+    state.replyTo
+      ? `${state.replyTo.author}: ${state.replyTo.snippet}`.replace(/\{/g, '(')
+      : 'none',
+    '',
+    `{bold}actions{/bold}`,
+    'Esc clear quote / back',
+    'B back to chats',
+    'Ctrl+up/down move quote',
+    'Ctrl+D download media',
+    '',
+    `{${theme.accent}-fg}mouse: click prompt, wheel transcript, click lines{/}`
+  ];
+  layout.chatDetailSideBody.setContent(lines.join('\n'));
+}
+
+function syncChatDetailShell() {
+  if (!layout.chatDetail) return;
+  const { top, left, mainWidth, sideWidth, gap, height } = detailGeometry();
+  layout.chatDetail.top = top;
+  layout.chatDetail.left = left;
+  layout.chatDetail.width = mainWidth + gap + sideWidth;
+  layout.chatDetail.height = height;
+
+  layout.chatDetailMain.top = 0;
+  layout.chatDetailMain.left = 0;
+  layout.chatDetailMain.width = mainWidth;
+  layout.chatDetailMain.height = height;
+  resizePaneInner(layout.chatDetailMain);
+
+  layout.chatDetailSide.top = 0;
+  layout.chatDetailSide.left = mainWidth + gap;
+  layout.chatDetailSide.width = sideWidth;
+  layout.chatDetailSide.height = height;
+  resizePaneInner(layout.chatDetailSide);
+  layout.chatDetailSideBody.top = 0;
+  layout.chatDetailSideBody.left = 0;
+  layout.chatDetailSideBody.width = layout.chatDetailSide._inner.width;
+  layout.chatDetailSideBody.height = layout.chatDetailSide._inner.height;
+
+  applyChatDetailLayout();
+}
+
+function ensureChatDetailLayout() {
+  if (layout.chatDetail) return;
+
+  layout.chatDetail = blessed.box({
+    top: 1,
+    left: 0,
+    width: '100%',
+    height: innerRows(),
+    transparent: false,
+    style: { fg: theme.fg }
+  });
+
+  layout.chatDetailMain = makePane(layout.chatDetail, ' thread ', {
+    transparent: false
+  });
+  layout.chatDetailSide = makePane(layout.chatDetail, ' chat info ', {
+    transparent: false
+  });
+  layout.chatDetailSideBody = blessed.box({
+    parent: layout.chatDetailSide._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 10,
+    tags: true,
+    transparent: false,
+    style: { fg: theme.fg }
+  });
+
+  layout.msgList = blessed.log({
+    parent: layout.chatDetailMain._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 10,
+    mouse: true,
+    scrollable: true,
+    alwaysScroll: true,
+    tags: true,
+    padding: { left: 0, right: 0 },
+    transparent: false,
+    style: { fg: theme.fg }
+  });
+
+  layout.replyBar = blessed.box({
+    parent: layout.chatDetailMain._inner,
+    bottom: 3,
+    left: 0,
+    width: 10,
+    height: 1,
+    hidden: true,
+    tags: true,
+    transparent: false,
+    style: { fg: theme.fgDim }
+  });
+
+  layout.input = blessed.textbox({
+    parent: layout.chatDetailMain._inner,
+    bottom: 0,
+    left: 0,
+    width: 10,
+    height: 3,
+    keys: true,
+    mouse: true,
+    inputOnFocus: true,
+    transparent: false,
+    style: { fg: theme.fg }
+  });
+
+  layout.input.on('submit', async (text) => {
+    if (!text.trim()) return;
+    try {
+      const sendOpts = state.replyTo
+        ? { quotedMessageId: state.replyTo.id }
+        : {};
+      await waService.sendMessage(
+        state.currentChatId,
+        text.trim(),
+        state.currentRawChat,
+        sendOpts
+      );
+      layout.input.clearValue();
+      delete state.chatDrafts[state.currentChatId];
+      clearReplyTarget();
+      updateReplyBarContent();
+      renderChatDetailMeta();
+      layout.input.focus();
+      screen.render();
+    } catch (e) {
+      const er = theme.error.slice(1);
+      layout.msgList.add(`{#${er}-fg}Failed to send: ${e.message}{/#${er}-fg}`);
+      screen.render();
+    }
+  });
+
+  screen.append(layout.chatDetail);
+  syncChatDetailShell();
+}
+
+function qrGeometry() {
+  const totalWidth = screen.width || 100;
+  const totalHeight = innerRows();
+  const leftWidth = Math.max(30, Math.floor(totalWidth * 0.30));
+  const gap = 1;
+  const rightWidth = Math.max(40, totalWidth - leftWidth - gap);
+  return { top: 1, height: totalHeight, leftWidth, rightWidth, gap };
+}
+
+function syncQrLayout() {
+  if (!layout.qrRoot) return;
+  const { top, height, leftWidth, rightWidth, gap } = qrGeometry();
+  layout.qrRoot.top = top;
+  layout.qrRoot.left = 0;
+  layout.qrRoot.width = screen.width || 100;
+  layout.qrRoot.height = height;
+
+  layout.qrStepsPane.top = 0;
+  layout.qrStepsPane.left = 0;
+  layout.qrStepsPane.width = leftWidth;
+  layout.qrStepsPane.height = height;
+  resizePaneInner(layout.qrStepsPane);
+  layout.qrStepsBody.top = 0;
+  layout.qrStepsBody.left = 0;
+  layout.qrStepsBody.width = layout.qrStepsPane._inner.width;
+  layout.qrStepsBody.height = layout.qrStepsPane._inner.height;
+
+  layout.qrPane.top = 0;
+  layout.qrPane.left = leftWidth + gap;
+  layout.qrPane.width = rightWidth;
+  layout.qrPane.height = height;
+  resizePaneInner(layout.qrPane);
+  layout.qrPaneBody.top = 0;
+  layout.qrPaneBody.left = 0;
+  layout.qrPaneBody.width = layout.qrPane._inner.width;
+  layout.qrPaneBody.height = layout.qrPane._inner.height;
+  if (layout.qrBox) {
+    layout.qrBox.top = Math.max(1, Math.floor((layout.qrPaneBody.height - layout.qrBox.height) / 2));
+    layout.qrBox.left = Math.max(1, Math.floor((layout.qrPaneBody.width - layout.qrBox.width) / 2));
+  }
+}
+
+function ensureQrLayout() {
+  if (layout.qrRoot) return;
+  layout.qrRoot = blessed.box({
+    top: 1,
+    left: 0,
+    width: '100%',
+    height: innerRows(),
+    transparent: true
+  });
+  screen.append(layout.qrRoot);
+
+  layout.qrStepsPane = makePane(layout.qrRoot, ' link_steps ');
+  layout.qrStepsBody = blessed.box({
+    parent: layout.qrStepsPane._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 10,
+    tags: true,
+    transparent: true,
+    style: { fg: theme.fg }
+  });
+
+  layout.qrPane = makePane(layout.qrRoot, ' scan_with_whatsapp ');
+  layout.qrPaneBody = blessed.box({
+    parent: layout.qrPane._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 10,
+    tags: true,
+    transparent: true,
+    align: 'center',
+    valign: 'middle',
+    style: { fg: theme.fg }
+  });
+
+  layout.qrBox = blessed.box({
+    parent: layout.qrPaneBody,
+    top: 0,
+    left: 0,
+    width: 42,
+    height: 18,
+    border: 'line',
+    tags: true,
+    align: 'center',
+    valign: 'middle',
+    transparent: true,
+    style: {
+      fg: theme.fg,
+      border: { fg: theme.fgDim }
+    }
+  });
+
+  syncQrLayout();
+}
+
+function settingsGeometry() {
+  const totalWidth = screen.width || 100;
+  const totalHeight = innerRows();
+  const leftWidth = Math.max(34, Math.floor(totalWidth * 0.32));
+  const gap = 1;
+  const rightWidth = Math.max(40, totalWidth - leftWidth - gap);
+  return { top: 1, height: totalHeight, leftWidth, rightWidth, gap };
+}
+
+function renderSettingsPreview(paletteId) {
+  if (!layout.settingsPreviewBody) return;
+  const p = buildTheme(normalizePaletteId(paletteId));
+  layout.settingsPreviewBody.setContent(
+    `{#${p.accent.slice(1)}-fg}{bold}wa-tui{/bold}{/#${p.accent.slice(1)}-fg} | settings preview\n` +
+      `{#${p.fgDim.slice(1)}-fg}Unread badge: {/#${p.fgDim.slice(1)}-fg}{#${p.unread.slice(1)}-fg}[4]{/#${p.unread.slice(1)}-fg}\n\n` +
+      `[00:17] {#${p.peerMsg.slice(1)}-fg}{bold}Titus{/#${p.peerMsg.slice(1)}-fg}{/bold}: image attached\n` +
+      `[00:19] {#${p.selfMsg.slice(1)}-fg}{bold}You{/#${p.selfMsg.slice(1)}-fg}{/bold}: opening thread now\n\n` +
+      `{#${p.accent.slice(1)}-fg}> {/#${p.accent.slice(1)}-fg}reply_to_titus_vetech\n` +
+      `{#${p.fgDim.slice(1)}-fg}Enter apply palette · Esc back{/}`
+  );
+}
+
+function syncSettingsItems() {
+  if (!layout.settingsList) return;
+  layout.settingsList.setItems(
+    PALETTE_ORDER.map((id) => {
+      const p = PALETTES[id];
+      const current =
+        theme.paletteId === id
+          ? ` {${theme.accent}-fg}* active{/${theme.accent}-fg}`
+          : '';
+      const preview =
+        settingsPreviewPaletteId === id && theme.paletteId !== id
+          ? ` {${theme.fgDim}-fg}(preview){/${theme.fgDim}-fg}`
+          : '';
+      const label = p.label.replace(/\{/g, '(').replace(/\}/g, ')');
+      return `${label} {${theme.fgDim}-fg}· ${id}{/${theme.fgDim}-fg}${current}${preview}`;
+    })
+  );
+}
+
+function syncSettingsListGeometry() {
+  if (!layout.settingsRoot) return;
+  const { top, height, leftWidth, rightWidth, gap } = settingsGeometry();
+  layout.settingsRoot.top = top;
+  layout.settingsRoot.left = 0;
+  layout.settingsRoot.width = screen.width || 100;
+  layout.settingsRoot.height = height;
+
+  layout.settingsListPane.top = 0;
+  layout.settingsListPane.left = 0;
+  layout.settingsListPane.width = leftWidth;
+  layout.settingsListPane.height = height;
+  resizePaneInner(layout.settingsListPane);
+  layout.settingsList.top = 0;
+  layout.settingsList.left = 0;
+  layout.settingsList.width = layout.settingsListPane._inner.width;
+  layout.settingsList.height = layout.settingsListPane._inner.height;
+
+  layout.settingsPreviewPane.top = 0;
+  layout.settingsPreviewPane.left = leftWidth + gap;
+  layout.settingsPreviewPane.width = rightWidth;
+  layout.settingsPreviewPane.height = height;
+  resizePaneInner(layout.settingsPreviewPane);
+  layout.settingsPreviewBody.top = 0;
+  layout.settingsPreviewBody.left = 0;
+  layout.settingsPreviewBody.width = layout.settingsPreviewPane._inner.width;
+  layout.settingsPreviewBody.height = layout.settingsPreviewPane._inner.height;
+}
+
+function ensureSettingsLayout() {
+  if (layout.settingsRoot) return;
+
+  layout.settingsRoot = blessed.box({
+    top: 1,
+    left: 0,
+    width: '100%',
+    height: innerRows(),
+    transparent: true
+  });
+  screen.append(layout.settingsRoot);
+
+  layout.settingsListPane = makePane(layout.settingsRoot, ' palettes ');
+  layout.settingsList = blessed.list({
+    parent: layout.settingsListPane._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 10,
+    keys: true,
+    vi: true,
+    mouse: true,
+    tags: true,
+    invertSelected: false,
+    transparent: true,
+    scrollbar: {
+      ch: '│',
+      style: { fg: theme.fgDim }
+    },
+    style: {
+      fg: theme.fg,
+      selected: {
+        fg: theme.accent,
+        bold: true,
+        underline: true
+      }
+    }
+  });
+
+  layout.settingsPreviewPane = makePane(layout.settingsRoot, ' preview ');
+  layout.settingsPreviewBody = blessed.box({
+    parent: layout.settingsPreviewPane._inner,
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 10,
+    tags: true,
+    transparent: true,
+    style: { fg: theme.fg }
+  });
+
+  layout.settingsList.on('select item', (item, index) => {
+    const id = PALETTE_ORDER[index];
+    if (!id) return;
+    settingsPreviewPaletteId = id;
+    renderSettingsPreview(id);
+    syncSettingsItems();
+    screen.render();
+  });
+
+  layout.settingsList.on('action', (item, index) => {
+    const id = PALETTES[PALETTE_ORDER[index]] ? PALETTE_ORDER[index] : null;
+    if (!id) return;
+    applyPalette(id);
+    closeSettings();
+  });
+
+  syncSettingsListGeometry();
+}
+
+function openSettings() {
+  if (state.screen !== 'chats' && state.screen !== 'chatDetail') return;
+  state.settingsReturnScreen = state.screen;
+  state.screen = 'settings';
+  settingsPreviewPaletteId = normalizePaletteId(theme.paletteId);
+  hidePrimaryViews();
+  ensureSettingsLayout();
+  syncSettingsListGeometry();
+  syncSettingsItems();
+  renderSettingsPreview(settingsPreviewPaletteId);
+  setPaneActive(layout.settingsListPane, true);
+  setPaneActive(layout.settingsPreviewPane, false);
+  refreshWidgetStyles();
+  layout.settingsRoot.show();
+  layout.settingsList.focus();
+  const selectedIndex = Math.max(0, PALETTE_ORDER.indexOf(settingsPreviewPaletteId));
+  layout.settingsList.select(selectedIndex);
+  updateTitle();
+  updateFooter();
+  screen.render();
+}
+
+function closeSettings() {
+  if (state.screen !== 'settings') return;
+  layout.settingsRoot?.hide();
+  const back = state.settingsReturnScreen || 'chats';
+  state.screen = back;
+  state.settingsReturnScreen = null;
+
+  if (back === 'chatDetail') {
+    showChatBrowserColumns('detail');
+    layout.chatDetail?.show();
+    refreshWidgetStyles();
+    redrawChatMessages();
+    updateReplyBarContent();
+    renderChatDetailMeta();
+    layout.input?.focus();
+    updateTitle();
+    updateFooter();
+    screen.render();
+    return;
+  }
+
+  if (back === 'chats' && state.chats && state.chats.length) {
+    showChats(state.chats);
+    return;
+  }
+
+  void refreshChats();
+}
+
 function showQr(qr) {
   stopBootLoader();
   state.screen = 'qr';
   state.qr = qr;
   tryResizeTerminal(42, 110);
-  layout.main.show();
-  layoutMainPanel('qr');
+  hidePrimaryViews();
+  ensureQrLayout();
+  syncQrLayout();
+  setPaneActive(layout.qrStepsPane, true);
+  setPaneActive(layout.qrPane, false);
   const dim = theme.fgDim.slice(1);
   const fg = theme.fg.slice(1);
-  layout.main.setContent(
-    `{#${dim}-fg}Scan this QR with WhatsApp →{/}\n\n{#${fg}-fg}Refreshing…{/}`
+  layout.qrStepsBody.setContent(
+    `{bold}Link steps{/bold}\n` +
+      `1. Open WhatsApp on your phone.\n` +
+      `2. Go to Settings -> Linked devices.\n` +
+      `3. Tap {#${theme.accent.slice(1)}-fg}Link a device{/}.\n` +
+      `4. Scan the code in the right pane.\n\n` +
+      `{bold}Session files{/bold}\n` +
+      `.wwebjs_auth/\n` +
+      `.wwebjs_cache/\n\n` +
+      `{#${dim}-fg}If the code expires, wa-tui refreshes it automatically.{/}`
   );
+  layout.qrBox.setContent(`{#${fg}-fg}Refreshing QR…{/}`);
+  layout.qrRoot.show();
   screen.render();
 
   qrcode.generate(qr, { small: true }, (code) => {
-    layout.main.setContent(
-      `{#${dim}-fg}Scan this QR with WhatsApp →{/}\n\n{#${fg}-fg}${code}{/}`
-    );
+    layout.qrBox.setContent(`{#${fg}-fg}${code}{/}`);
     screen.render();
   });
   updateTitle();
@@ -692,79 +1490,68 @@ function showQr(qr) {
 
 function showChats(chats) {
   stopBootLoader();
-  tryResizeTerminal(30, 100);
+  tryResizeTerminal(32, 118);
   state.screen = 'chats';
   state.loading = false;
   state.chats = chats;
   state.unreadCount = chats.reduce((acc, c) => acc + c.unreadCount, 0);
+  chatPreviewToken++;
 
-  if (layout.main) layout.main.hide();
-  if (layout.chatDetail) layout.chatDetail.hide();
-  if (layout.settingsList) layout.settingsList.hide();
-
-  if (!layout.chatList) {
-    layout.chatList = blessed.list({
-      top: 1,
-      left: 0,
-      width: '100%',
-      height: innerRows(),
-      keys: true,
-      vi: true,
-      mouse: true,
-      tags: true,
-      invertSelected: false,
-      transparent: true,
-      scrollbar: {
-        ch: '│',
-        style: {
-          fg: theme.fgDim
-        }
-      },
-      style: {
-        fg: theme.fg,
-        selected: {
-          fg: theme.accent,
-          bold: true,
-          underline: true
-        }
-      }
-    });
-
-    screen.append(layout.chatList);
-  }
+  hidePrimaryViews();
+  ensureChatBrowserLayout();
+  showChatBrowserColumns('browser');
+  syncChatBrowserLayout();
+  setPaneActive(layout.chatListPane, true);
+  setPaneActive(layout.chatPreviewPane, false);
+  setPaneActive(layout.chatMetaPane, false);
 
   const result = paginate(chats, state.page, state.pageSize);
   state.page = result.page;
-  const pageItems = result.items;
+  currentChatPageItems = result.items;
 
-  syncListAndDetailHeights();
-  layout.chatList.show();
   refreshWidgetStyles();
-
-  const items = pageItems.map((c) => {
-    const unread =
-      c.unreadCount > 0
-        ? ` {${theme.unread}-fg}[${c.unreadCount}]{/${theme.unread}-fg}`
-        : '';
-    const type = c.isGroup ? ` {${theme.fgDim}-fg}[Grp]{/${theme.fgDim}-fg}` : '';
-    const time = formatTimestamp(c.timestamp);
-    const lastMsg = truncate(c.lastMessage);
-    // Plain name (no inline fg tags) so the list row's item vs selected fg actually shows.
-    const name = String(c.name || '').replace(/\{/g, '(').replace(/\}/g, ')');
-
-    return `${name}${unread}${type} {${theme.fgDim}-fg}- ${time}{/${theme.fgDim}-fg}\n   {${theme.fgDim}-fg}${lastMsg.replace(/\{/g, '(').replace(/\}/g, ')')}{/${theme.fgDim}-fg}`;
+  layout.chatListMeta.setContent(
+    `filter: ${state.filter}   sort: ${state.chatSort}   page: ${state.page}\n` +
+      `${state.unreadOnly ? 'unread_only on' : 'unread_only off'}   mouse: click or wheel`
+  );
+  layout.chatList.show();
+  layout.chatList.setItems(formatChatListItems(currentChatPageItems));
+  layout.chatList.removeAllListeners('select item');
+  layout.chatList.removeAllListeners('action');
+  layout.chatList.on('select item', (item, index) => {
+    const chat = currentChatPageItems[index];
+    if (!chat) return;
+    layout.chatPreviewMeta.setContent(
+      `${chat.name.replace(/\{/g, '(')}\n` +
+        `${chat.isGroup ? 'group' : 'direct'} · ${formatTimestamp(chat.timestamp)}`
+    );
+    renderChatMeta(chat);
+    void loadChatPreview(chat);
+    screen.render();
+  });
+  layout.chatList.on('action', (item, index) => {
+    const chat = currentChatPageItems[index];
+    if (chat) void openChat(chat);
   });
 
-  layout.chatList.setItems(items);
-
-  layout.chatList.removeAllListeners('select');
-  layout.chatList.on('select', async (item, index) => {
-    const chat = pageItems[index];
-    if (chat) {
-      await openChat(chat);
-    }
-  });
-
+  const selectedIndex = Math.max(
+    0,
+    currentChatPageItems.findIndex((chat) => chat.id === state.currentChatId)
+  );
+  if (currentChatPageItems.length) {
+    layout.chatList.select(selectedIndex);
+    const chat = currentChatPageItems[selectedIndex];
+    layout.chatPreviewMeta.setContent(
+      `${chat.name.replace(/\{/g, '(')}\n` +
+        `${chat.isGroup ? 'group' : 'direct'} · ${formatTimestamp(chat.timestamp)}`
+    );
+    renderChatMeta(chat);
+    void loadChatPreview(chat);
+  } else {
+    layout.chatPreviewMeta.setContent('no chats\ntry changing filters or reload');
+    renderChatPreviewBody(null, [], null);
+    renderChatMeta(null);
+  }
   layout.chatList.focus();
   updateTitle();
   screen.render();
@@ -792,97 +1579,19 @@ async function openChat(chatOrId) {
   clearLiveDedup();
   clearReplyTarget();
 
-  if (layout.chatList) layout.chatList.hide();
-  if (layout.settingsList) layout.settingsList.hide();
-
-  if (!layout.chatDetail) {
-    layout.chatDetail = blessed.box({
-      top: 1,
-      left: 0,
-      width: '100%',
-      height: innerRows(),
-      transparent: true,
-      style: {
-        fg: theme.fg
-      }
-    });
-
-    layout.msgList = blessed.log({
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: innerRows() - 3,
-      scrollable: true,
-      alwaysScroll: true,
-      tags: true,
-      padding: { left: 0, right: 0 },
-      transparent: true,
-      style: {
-        fg: theme.fg
-      }
-    });
-
-    layout.replyBar = blessed.box({
-      bottom: 3,
-      left: 0,
-      width: '100%',
-      height: 1,
-      hidden: true,
-      tags: true,
-      transparent: true,
-      style: {
-        fg: theme.fgDim
-      }
-    });
-
-    layout.input = blessed.textbox({
-      bottom: 0,
-      left: 0,
-      width: '100%',
-      height: 3,
-      keys: true,
-      inputOnFocus: true,
-      transparent: true,
-      style: {
-        fg: theme.fg
-      }
-    });
-
-    layout.input.on('submit', async (text) => {
-      if (text.trim()) {
-        try {
-          const sendOpts = state.replyTo
-            ? { quotedMessageId: state.replyTo.id }
-            : {};
-          await waService.sendMessage(
-            state.currentChatId,
-            text.trim(),
-            state.currentRawChat,
-            sendOpts
-          );
-          layout.input.clearValue();
-          delete state.chatDrafts[state.currentChatId];
-          clearReplyTarget();
-          updateReplyBarContent();
-          layout.input.focus();
-          screen.render();
-        } catch (e) {
-          const er = theme.error.slice(1);
-          layout.msgList.add(`{#${er}-fg}Failed to send: ${e.message}{/#${er}-fg}`);
-          screen.render();
-        }
-      }
-    });
-
-    layout.chatDetail.append(layout.msgList);
-    layout.chatDetail.append(layout.replyBar);
-    layout.chatDetail.append(layout.input);
-    screen.append(layout.chatDetail);
-  }
-
-  syncListAndDetailHeights();
+  layout.main?.hide();
+  layout.settingsRoot?.hide();
+  layout.qrRoot?.hide();
+  ensureChatBrowserLayout();
+  showChatBrowserColumns('detail');
+  ensureChatDetailLayout();
+  syncChatDetailShell();
   layout.chatDetail.show();
+  setPaneActive(layout.chatListPane, false);
+  setPaneActive(layout.chatDetailMain, true);
+  setPaneActive(layout.chatDetailSide, false);
   layout.msgList.setContent(`{${theme.fgDim}-fg}Loading messages…{/${theme.fgDim}-fg}`);
+  renderChatDetailMeta();
   updateTitle();
   screen.render();
 
@@ -890,6 +1599,7 @@ async function openChat(chatOrId) {
   try {
     messages = await waService.getMessages(chat.id, 40, chat.raw);
   } catch (e) {
+    state.loading = false;
     const er = theme.error.slice(1);
     layout.msgList.setContent(`{#${er}-fg}Error loading messages: ${e.message}{/#${er}-fg}`);
     screen.render();
@@ -911,6 +1621,8 @@ async function openChat(chatOrId) {
 
   updateReplyBarContent();
   applyChatDetailLayout();
+  renderChatDetailMeta();
+  state.loading = false;
 
   const draft = state.chatDrafts[chat.id];
   if (draft) layout.input.setValue(draft);
@@ -1036,10 +1748,20 @@ waService.on('message', (msg) => {
     state.screen === 'chatDetail' && chatIdsMatch(state.currentChatId, msg.chatId);
   if (!msg.fromMe && !viewingThisChat) {
     playIncomingMessageSound();
+    const title = msg.isGroup
+      ? (msg.chatName || 'WhatsApp')
+      : (msg.author || msg.chatName || 'WhatsApp');
+    const subtitle =
+      msg.isGroup && msg.author ? `from ${msg.author}` : 'new message';
+    notifyDesktop({
+      title: `wa-tui · ${title}`,
+      subtitle,
+      body: msg.displayBody || msg.body || '[media]'
+    });
   }
 
   if (state.screen === 'chats') {
-    refreshChats();
+    void refreshChats();
   }
 
   if (

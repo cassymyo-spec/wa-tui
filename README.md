@@ -89,9 +89,12 @@ Run the command from whatever directory you want to use for WhatsApp session fil
 | -------- | ----------- |
 | `WA_TUI_RESIZE` | Set to `1` to enable resize-related behavior used during development (`npm run start:resize`). |
 | `WA_TUI_NO_SOUND` | Set to `1` to disable the incoming-message notification sound. |
+| `WA_TUI_NO_DESKTOP_NOTIFY` | Set to `1` to disable desktop notifications for incoming messages in chats you are not currently viewing. |
 | `WA_TUI_SOUND` | Optional path to an audio file (macOS: `afplay`; Linux: `paplay` / `aplay`). Overrides the default tone. |
 
 Incoming messages play a short sound when you are **not** viewing that chat. Defaults: **macOS** — `Ping.aiff` via `afplay`; **Windows** — short two-tone console beep; **Linux** — freedesktop `complete.oga` or `message.oga`, then WAV fallback; otherwise the terminal bell. There is no sound for your own messages or for messages in the chat you currently have open.
+
+Desktop notifications are also sent for incoming messages outside the chat you currently have open. They are best-effort: **macOS** uses `osascript`, **Linux** uses `notify-send`, and **Windows** uses a small PowerShell balloon notification.
 
 ## Scripts (development)
 

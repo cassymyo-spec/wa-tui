@@ -115,14 +115,21 @@ class WhatsAppService extends EventEmitter {
             ? String(msg.id.remote)
             : '';
         const chatId = remote || (msg.fromMe ? msg.to : msg.from);
+        let chat = null;
+        let chatName = '';
+        let isGroup = false;
 
         let author = 'You';
         if (!msg.fromMe) {
           try {
-            const chat = await msg.getChat();
+            chat = await msg.getChat();
+            chatName =
+              (chat && (chat.name || chat.formattedTitle || '').trim()) || '';
+            isGroup = Boolean(chat && chat.isGroup);
             author = await resolveIncomingAuthor(msg, chat);
           } catch (_) {
             author = formatPeerLabel(msg.author || msg.from);
+            chatName = author;
           }
         }
 
@@ -135,6 +142,8 @@ class WhatsAppService extends EventEmitter {
           displayBody: displayBodyForParts(msg.type, msg.hasMedia, msg.body),
           timestamp: msg.timestamp,
           author,
+          chatName,
+          isGroup,
           fromMe: msg.fromMe,
           type: msg.type,
           hasMedia: Boolean(msg.hasMedia),
