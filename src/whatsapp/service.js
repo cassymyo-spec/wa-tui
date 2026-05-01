@@ -174,6 +174,11 @@ class WhatsAppService extends EventEmitter {
     });
     this.ready = false;
     this._remoteTypingBridgeInstalled = false;
+    this._reconnectAttempt = 0
+    this._reconnecting = false;
+    this._onQr = null;  
+    this._onAuth = null;
+    this._noRetryReasons = new Set(['CONFLICT', 'LOGOUT'])
   }
 
   /**
@@ -333,6 +338,7 @@ class WhatsAppService extends EventEmitter {
 
     this.client.on('ready', () => {
       this.ready = true;
+      this._reconnectAttempt = 0;
       this.emit('lifecycle', { phase: 'ready' });
       onReady();
     });
@@ -349,6 +355,10 @@ class WhatsAppService extends EventEmitter {
     this.client.on('disconnected', (reason) => {
       this.ready = false;
       this.emit('lifecycle', { phase: 'disconnected', reason });
+
+      if (this._noRetryReasons.has(reason)) return;
+      this._scheduleReconnet();
+      
     });
 
     this.client.on('message_ack', (msg, ack) => {
@@ -521,6 +531,55 @@ class WhatsAppService extends EventEmitter {
       try {
         await this.client.destroy();
       } catch (_) {}
+    }
+  }
+
+  _scheduleReconnet(){
+    if (this._reconnecting) return;
+    this._reconnecting = true;
+
+    const MAX_ATTEMPTS = 5;
+    const BASE_DELAY_MS = 3000;
+
+    if(this._reconnectAttempt >= MAX_ATTEMPTS){
+      this.emit('lifecycle', {phase: 'reconnect_failed'});
+      this._reconnecting = false;
+      return;
+    }
+
+    const delay = BASE_DELAY_MS * Math.pow(2, this._reconnectAttempt);
+    this._reconnectAttempt++;
+
+    this.emit('lifecycle',{
+      phase: 'reconnecting',
+      attempt: this._reconnectAttempt,
+      maxAttempts: MAX_ATTEMPTS,
+      delayMs: delay
+    });
+
+    setTimeout(() => this._doReconnect(), delay);
+  }
+
+  async _doReconnect() {
+    try {
+      // show no messy destroy the old client cleanly before creating a fresh one
+      try { await this.client.destroy(); } catch (_) {}
+
+      this.client = new Client({
+        authStrategy: new LocalAuth(),
+        puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+      });
+      this._remoteTypingBridgeInstalled = false;
+      this._reconnecting = false;
+
+      await this.initialize(this._onQr, this._onReady, this._onAuth);
+
+      // reset on successful reconnect
+      this._reconnectAttempt = 0;
+    } catch (err) {
+      this._reconnecting = false;
+      this.emit('lifecycle', { phase: 'reconnect_error', message: err.message });
+      this._scheduleReconnect(); 
     }
   }
 }
